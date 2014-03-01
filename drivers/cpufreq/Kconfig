@@ -82,6 +82,12 @@ config CPU_FREQ_DEFAULT_GOV_SMARTMAX
         help
           Use the CPUFreq governor 'smartmax' as default
 
+config CPU_FREQ_DEFAULT_GOV_WHEATLEY
+        bool "wheatley"
+        select CPU_FREQ_GOV_WHEATLEY
+        help
+          Use the CPUFreq governor 'wheatley' as default
+
 config CPU_FREQ_DEFAULT_GOV_POWERSAVE
 	bool "powersave"
 	depends on EXPERT
@@ -175,6 +181,10 @@ config CPU_FREQ_GOV_SMARTMAX
 config CPU_FREQ_GOV_SMARTMAX_FIND5
         bool "'smartmax' defaults for find5"
         depends on CPU_FREQ_GOV_SMARTMAX
+
+config CPU_FREQ_GOV_WHEATLEY
+        tristate "'Wheatley' cpufreq policy governor"
+        select CPU_FREQ_TABLE
 
 config CPU_FREQ_GOV_USERSPACE
 	tristate "'userspace' governor for userspace frequency scaling"
