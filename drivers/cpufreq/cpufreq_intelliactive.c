@@ -472,7 +472,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 					continue;
 
 				max_load = max(max_load, picpu->prev_load);
-				max_freq = max(max_freq, picpu->policy->cur);
+				max_freq = max(max_freq, picpu->target_freq);
 			}
 
 			if (max_freq > up_threshold_any_cpu_freq &&
@@ -865,7 +865,8 @@ static ssize_t show_target_loads(
 		ret += sprintf(buf + ret, "%u%s", target_loads[i],
 			       i & 0x1 ? ":" : " ");
 
-	ret += sprintf(buf + --ret, "\n");
+	--ret;
+	ret += sprintf(buf + ret, "\n");
 	spin_unlock_irqrestore(&target_loads_lock, flags);
 	return ret;
 }
@@ -908,7 +909,8 @@ static ssize_t show_above_hispeed_delay(
 		ret += sprintf(buf + ret, "%u%s", above_hispeed_delay[i],
 			       i & 0x1 ? ":" : " ");
 
-	ret += sprintf(buf + --ret, "\n");
+	--ret;
+	ret += sprintf(buf + ret, "\n");
 	spin_unlock_irqrestore(&above_hispeed_delay_lock, flags);
 	return ret;
 }
@@ -1266,28 +1268,11 @@ static void interactive_input_event(struct input_handle *handle,
 	}
 }
 
-static int input_dev_filter(const char *input_dev_name)
-{
-	if (strstr(input_dev_name, "touchscreen") ||
-	    strstr(input_dev_name, "synaptics-rmi-ts") ||
-	    strstr(input_dev_name, "touch_dev") ||
-	    strstr(input_dev_name, "sec-touchscreen") ||
-	    strstr(input_dev_name, "keypad")) {
-		return 0;
-	} else {
-		return 1;
-	}
-}
-
-
 static int interactive_input_connect(struct input_handler *handler,
 		struct input_dev *dev, const struct input_device_id *id)
 {
 	struct input_handle *handle;
 	int error;
-
-	if (input_dev_filter(dev->name))
-		return -ENODEV;
 
 	handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
 	if (!handle)
@@ -1321,8 +1306,21 @@ static void interactive_input_disconnect(struct input_handle *handle)
 }
 
 static const struct input_device_id interactive_ids[] = {
-	{ .driver_info = 1 },
-	{ },
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
+			 INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.evbit = { BIT_MASK(EV_ABS) },
+		.absbit = { [BIT_WORD(ABS_MT_POSITION_X)] =
+			    BIT_MASK(ABS_MT_POSITION_X) |
+			    BIT_MASK(ABS_MT_POSITION_Y) },
+	}, /* multi-touch touchscreen */
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_KEYBIT |
+			 INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.keybit = { [BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH) },
+		.absbit = { [BIT_WORD(ABS_X)] =
+			    BIT_MASK(ABS_X) | BIT_MASK(ABS_Y) },
+	}, /* touchpad */
 };
 
 static struct input_handler interactive_input_handler = {
@@ -1389,6 +1387,8 @@ static int cpufreq_governor_intelliactive(struct cpufreq_policy *policy,
 			pcpu->hispeed_validate_time =
 				pcpu->floor_validate_time;
 			down_write(&pcpu->enable_sem);
+			del_timer_sync(&pcpu->cpu_timer);
+			del_timer_sync(&pcpu->cpu_slack_timer);
 			cpufreq_interactive_timer_start(j);
 			pcpu->governor_enabled = 1;
 			up_write(&pcpu->enable_sem);
@@ -1402,10 +1402,6 @@ static int cpufreq_governor_intelliactive(struct cpufreq_policy *policy,
 			mutex_unlock(&gov_lock);
 			return 0;
 		}
-
-		if (!policy->cpu)
-			rc = input_register_handler
-				(&interactive_input_handler);
 
 		rc = sysfs_create_group(cpufreq_global_kobject,
 				&interactive_attr_group);
@@ -1426,14 +1422,13 @@ static int cpufreq_governor_intelliactive(struct cpufreq_policy *policy,
 			pcpu = &per_cpu(cpuinfo, j);
 			down_write(&pcpu->enable_sem);
 			pcpu->governor_enabled = 0;
+			pcpu->target_freq = 0;
 			del_timer_sync(&pcpu->cpu_timer);
 			del_timer_sync(&pcpu->cpu_slack_timer);
 			up_write(&pcpu->enable_sem);
 		}
 
 		if (--active_count > 0) {
-			if (!policy->cpu)
-				input_unregister_handler(&interactive_input_handler);
 			mutex_unlock(&gov_lock);
 			return 0;
 		}
@@ -1492,7 +1487,7 @@ static void cpufreq_interactive_nop_timer(unsigned long data)
 
 static int __init cpufreq_intelliactive_init(void)
 {
-	unsigned int i;
+	unsigned int i, rc;
 	struct cpufreq_interactive_cpuinfo *pcpu;
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
@@ -1506,6 +1501,8 @@ static int __init cpufreq_intelliactive_init(void)
 		pcpu->cpu_slack_timer.function = cpufreq_interactive_nop_timer;
 		spin_lock_init(&pcpu->load_lock);
 		init_rwsem(&pcpu->enable_sem);
+		if (!i)
+			rc = input_register_handler(&interactive_input_handler);
 	}
 
 	spin_lock_init(&target_loads_lock);
@@ -1535,7 +1532,13 @@ module_init(cpufreq_intelliactive_init);
 
 static void __exit cpufreq_interactive_exit(void)
 {
+	unsigned int cpu;
+
 	cpufreq_unregister_governor(&cpufreq_gov_intelliactive);
+	for_each_possible_cpu(cpu) {
+		if(!cpu)
+			input_unregister_handler(&interactive_input_handler);
+	}
 	kthread_stop(speedchange_task);
 	put_task_struct(speedchange_task);
 }
